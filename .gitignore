@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+.env.local
+
+# Build outputs
+dist/
+build/
+
+# OS/Editor specific files
+.DS_Store
+.vscode/
+# Add all files in the directory
+git add .
+
+# Or add specific files individually
+git add index.html script.js App.jsx
+git commit -m "Add functional header navigation and feature cards"
