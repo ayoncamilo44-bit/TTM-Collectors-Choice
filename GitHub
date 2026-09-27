@@ -1,3 +1,186 @@
 git remote add origin https://github.com/your-username/collectors-choice.git
 git branch -M main
 git push -u origin main
+[
+  {
+    "AllowedHeaders": ["*"],
+    "AllowedMethods": ["PUT", "GET"],
+    "AllowedOrigins": ["http://localhost:3000", "https://yourdomain.com"],
+    "ExposeHeaders": []
+  }
+]
+<!-- listing-form.html -->
+<form id="create-listing-form">
+  <h2>Create New Asset Listing</h2>
+  
+  <label for="title">Title:</label>
+  <input type="text" id="title" required />
+
+  <label for="price">Price ($):</label>
+  <input type="number" id="price" required />
+
+  <label for="file-input">Upload High-Res Media / Certificates:</label>
+  <input type="file" id="file-input" multiple accept="image/*,application/pdf" />
+
+  <!-- Upload Progress Visualizer -->
+  <div id="progress-container" style="display:none; margin-top:15px;">
+    <progress id="upload-progress" value="0" max="100" style="width: 100%;"></progress>
+    <span id="progress-text">0%</span>
+  </div>
+
+  <button type="submit" id="submit-btn" style="margin-top:20px;">Save Listing</button>
+</form>
+
+<script>
+document.getElementById('create-listing-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  const title = document.getElementById('title').value;
+  const price = document.getElementById('price').value;
+  const fileInput = document.getElementById('file-input');
+  const files = fileInput.files;
+
+  const submitBtn = document.getElementById('submit-btn');
+  const progressContainer = document.getElementById('progress-container');
+  const progressBar = document.getElementById('upload-progress');
+  const progressText = document.getElementById('progress-text');
+
+  if (files.length === 0) {
+    alert('Please select at least one file.');
+    return;
+  }
+
+  submitBtn.disabled = true;
+  progressContainer.style.display = 'block';
+
+  try {
+    const uploadedFileUrls = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+
+      // 1. Get presigned URL from backend
+      const res = await fetch('/api/upload-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: file.name, fileType: file.type })
+      });
+      const { uploadUrl, publicUrl } = await res.json();
+
+      // 2. Upload file directly to S3 with progress tracking
+      await uploadFileToS3(uploadUrl, file, (percent) => {
+        const totalProgress = Math.round(((i + percent / 100) / files.length) * 100);
+        progressBar.value = totalProgress;
+        progressText.innerText = `Uploading file ${i + 1} of ${files.length}: ${totalProgress}%`;
+      });
+
+      uploadedFileUrls.push(publicUrl);
+    }
+
+    // 3. Send final listing details to backend
+    const listingRes = await fetch('/api/listings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        price,
+        fileUrls: uploadedFileUrls
+      })
+    });
+
+    if (listingRes.ok) {
+      alert('Listing created successfully!');
+      document.getElementById('create-listing-form').reset();
+    }
+  } catch (error) {
+    console.error('Upload failed:', error);
+    alert('Error uploading file. Please try again.');
+  } finally {
+    submitBtn.disabled = false;
+    progressContainer.style.display = 'none';
+  }
+});
+
+// Helper function to handle direct PUT upload to S3 with progress updates
+function uploadFileToS3(url, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url, true);
+    xhr.setRequestHeader('Content-Type', file.type);
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        const percentComplete = (event.loaded / event.total) * 100;
+        onProgress(percentComplete);
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status === 200) {
+        resolve();
+      } else {
+        reject(new Error(`Upload failed with status ${xhr.status}`));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error('Network error during upload'));
+    xhr.send(file);
+  });
+}
+</script>
+// server.js
+const express = require('express');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const crypto = require('crypto');
+
+const app = express();
+app.use(express.json());
+
+const s3Client = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
+});
+
+// Endpoint to generate a presigned upload URL
+app.post('/api/upload-url', async (req, res) => {
+  try {
+    const { fileName, fileType } = req.body;
+    
+    // Create a unique key to prevent file name collisions
+    const fileKey = `listings/${crypto.randomUUID()}-${fileName}`;
+
+    const command = new PutObjectCommand({
+      Bucket: process.env.S3_BUCKET_NAME,
+      Key: fileKey,
+      ContentType: fileType,
+    });
+
+    // URL valid for 15 minutes
+    const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 900 });
+
+    res.json({
+      uploadUrl,
+      fileKey,
+      publicUrl: `https://${process.env.S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileKey}`
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to generate upload URL' });
+  }
+});
+
+// Endpoint to save the final listing once upload finishes
+app.post('/api/listings', async (req, res) => {
+  const { title, price, category, fileUrls } = req.body;
+  
+  // Save listing data + fileUrls array to your database (e.g., PostgreSQL, MongoDB)
+  console.log('New listing created:', { title, price, category, fileUrls });
+  
+  res.status(201).json({ success: true, message: 'Listing created successfully' });
+});
+
+app.listen(3000, () => console.log('Server running on port 3000'));
+npm install @aws-sdk/client-s3 @aws-sdk/s3-request-presigner
